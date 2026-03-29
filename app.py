@@ -39,8 +39,32 @@ col2.metric("P-value", f"{p:.3f}")
 # Chart
 fig = px.line(df_merged, x="timestamp", y=["norm_latency", "norm_intensity"],
               title="Solar Intensity vs Network Latency (Normalized)")
-st.plotly_chart(fig, use_container_width=True)
+# Add flare event markers
+df_flares_plot = pd.read_csv("flares.csv", parse_dates=["peak_time"])
+df_flares_plot["peak_time"] = df_flares_plot["peak_time"].dt.tz_localize(None)
+
+for _, flare in df_flares_plot.iterrows():
+    color = "red" if flare["class"][0] == "X" else "orange"
+    fig.add_shape(
+        type="line",
+        x0=str(flare["peak_time"]),
+        x1=str(flare["peak_time"]),
+        y0=0, y1=1,
+        yref="paper",
+        line=dict(color=color, dash="dash", width=1.5)
+    )
+    fig.add_annotation(
+        x=str(flare["peak_time"]),
+        y=1,
+        yref="paper",
+        text=flare["class"],
+        showarrow=False,
+        font=dict(color=color, size=10),
+        yshift=5
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
 
 # Flare events table
 st.write("### Flare Events")
-st.dataframe(df_flares[["peak_time", "intensity", "class"]])
+st.dataframe(df_flares_plot[["peak_time", "intensity", "class"]])
