@@ -63,6 +63,8 @@ if st.button("🔄 Fetch Live Data"):
                 except:
                     continue
             df_flares = pd.DataFrame(flares).sort_values("peak_time") if flares else pd.DataFrame()
+            # Save to session state
+            st.session_state["df_flares"] = df_flares
             if df_flares.empty:
                 st.warning("No flares detected in the last 7 days. The Sun is quiet!")
             else:
@@ -93,85 +95,89 @@ if st.button("🔄 Fetch Live Data"):
                             "latency": r['min']
                         })
             df_pings = pd.DataFrame(pings).sort_values("timestamp")
+            # Save to session state
+            st.session_state["df_pings"] = df_pings
             st.success(f"Fetched {len(df_pings)} ping measurements from {len(bg_ids)} Bulgarian probes.")
         except Exception as e:
             st.error(f"RIPE Atlas error: {e}")
             st.stop()
 
-    # Show results
-    if not df_pings.empty:
-        df_pings_resampled = df_pings.set_index("timestamp").resample("10min").mean().reset_index()
+# ---- Everything below uses session state, so slider works instantly ----
+if "df_pings" in st.session_state and "df_flares" in st.session_state:
+    df_pings = st.session_state["df_pings"]
+    df_flares = st.session_state["df_flares"]
 
-        st.markdown("<hr class='divider'>", unsafe_allow_html=True)
-        st.markdown("### 📡 Live Results")
+    df_pings_resampled = df_pings.set_index("timestamp").resample("10min").mean().reset_index()
 
-        if df_flares.empty:
-            # No flares — show baseline only
-            st.markdown("<div class='alert-box'>NO SOLAR FLARES DETECTED IN THE LAST 7 DAYS — Sun is currently quiet. Showing network baseline data only.</div>", unsafe_allow_html=True)
+    st.markdown("<hr class='divider'>", unsafe_allow_html=True)
+    st.markdown("### 📡 Live Results")
 
-            col1, col2 = st.columns(2)
-            col1.metric("Flares found", "0")
-            col2.metric("Average Latency (baseline)", f"{df_pings['latency'].mean():.2f} ms")
+    if df_flares.empty:
+        st.markdown("<div class='alert-box'>NO SOLAR FLARES DETECTED IN THE LAST 7 DAYS — Sun is currently quiet. Showing network baseline data only.</div>", unsafe_allow_html=True)
 
-            fig = px.line(df_pings_resampled, x="timestamp", y="latency",
-                          title="Bulgarian Internet Latency — Last 7 Days (No Flare Activity)",
-                          labels={"latency": "Latency (ms)", "timestamp": "Date"},
-                          color_discrete_sequence=["#4fc3f7"])
-            fig.update_layout(
-                paper_bgcolor="#0a0e1a", plot_bgcolor="#0d1b2a",
-                font=dict(color="#e0e8ff", family="Courier New", size=13),
-                xaxis=dict(gridcolor="#1e3a5f"), yaxis=dict(gridcolor="#1e3a5f")
-            )
-            st.plotly_chart(fig, use_container_width=True)
+        col1, col2 = st.columns(2)
+        col1.metric("Flares found", "0")
+        col2.metric("Average Latency (baseline)", f"{df_pings['latency'].mean():.2f} ms")
 
-        else:
-            # Flares found — full correlation analysis
-            df_flares["peak_time"] = df_flares["peak_time"].dt.tz_localize(None)
-            df_flares["peak_time"] = df_flares["peak_time"] + pd.Timedelta(minutes=lag)
+        fig = px.line(df_pings_resampled, x="timestamp", y="latency",
+                      title="Bulgarian Internet Latency — Last 7 Days (No Flare Activity)",
+                      labels={"latency": "Latency (ms)", "timestamp": "Date"},
+                      color_discrete_sequence=["#4fc3f7"])
+        fig.update_layout(
+            paper_bgcolor="#0a0e1a", plot_bgcolor="#0d1b2a",
+            font=dict(color="#e0e8ff", family="Courier New", size=13),
+            xaxis=dict(gridcolor="#1e3a5f"), yaxis=dict(gridcolor="#1e3a5f")
+        )
+        st.plotly_chart(fig, use_container_width=True)
 
-            df_merged = pd.merge_asof(
-                df_pings_resampled, df_flares,
-                left_on="timestamp", right_on="peak_time",
-                direction="nearest", tolerance=pd.Timedelta("4hours")
-            ).fillna(0)
+    else:
+        df_flares = df_flares.copy()
+        df_flares["peak_time"] = df_flares["peak_time"].dt.tz_localize(None)
+        df_flares["peak_time"] = df_flares["peak_time"] + pd.Timedelta(minutes=lag)
 
-            df_merged["norm_latency"] = (df_merged["latency"] - df_merged["latency"].min()) / (df_merged["latency"].max() - df_merged["latency"].min())
-            df_merged["norm_intensity"] = (df_merged["intensity"] - df_merged["intensity"].min()) / (df_merged["intensity"].max() - df_merged["intensity"].min())
+        df_merged = pd.merge_asof(
+            df_pings_resampled, df_flares,
+            left_on="timestamp", right_on="peak_time",
+            direction="nearest", tolerance=pd.Timedelta("4hours")
+        ).fillna(0)
 
-            r_val, p_val = stats.pearsonr(df_merged["latency"], df_merged["intensity"])
+        df_merged["norm_latency"] = (df_merged["latency"] - df_merged["latency"].min()) / (df_merged["latency"].max() - df_merged["latency"].min())
+        df_merged["norm_intensity"] = (df_merged["intensity"] - df_merged["intensity"].min()) / (df_merged["intensity"].max() - df_merged["intensity"].min())
 
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Pearson r", f"{r_val:.3f}")
-            col2.metric("P-value", f"{p_val:.3f}")
-            col3.metric("Significance", "YES ✓" if p_val < 0.05 else "NO")
-            col4.metric("Flares found", len(df_flares))
+        r_val, p_val = stats.pearsonr(df_merged["latency"], df_merged["intensity"])
 
-            fig = px.line(df_merged, x="timestamp", y=["norm_latency", "norm_intensity"],
-                          labels={"value": "Normalized Signal", "variable": "Measurement", "timestamp": "Date"},
-                          color_discrete_map={"norm_latency": "#4fc3f7", "norm_intensity": "#f77f00"})
-            fig.update_layout(
-                paper_bgcolor="#0a0e1a", plot_bgcolor="#0d1b2a",
-                font=dict(color="#e0e8ff", family="Courier New", size=13),
-                xaxis=dict(gridcolor="#1e3a5f"), yaxis=dict(gridcolor="#1e3a5f"),
-                legend=dict(orientation="h", y=1.1, bgcolor="rgba(0,0,0,0)")
-            )
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Pearson r", f"{r_val:.3f}")
+        col2.metric("P-value", f"{p_val:.3f}")
+        col3.metric("Significance", "YES ✓" if p_val < 0.05 else "NO")
+        col4.metric("Flares found", len(df_flares))
 
-            for _, flare in df_flares.iterrows():
-                is_x = flare["class"][0] == "X"
-                color = "#ff4444" if is_x else "#ff9900"
-                fig.add_shape(type="line",
-                    x0=str(flare["peak_time"]), x1=str(flare["peak_time"]),
-                    y0=0, y1=1, yref="paper",
-                    line=dict(color=color, dash="dash", width=2.5 if is_x else 1.5))
-                fig.add_annotation(
-                    x=str(flare["peak_time"]), y=1, yref="paper",
-                    text=flare["class"], showarrow=False,
-                    font=dict(color=color, size=11, family="Courier New"), yshift=8)
+        fig = px.line(df_merged, x="timestamp", y=["norm_latency", "norm_intensity"],
+                      labels={"value": "Normalized Signal", "variable": "Measurement", "timestamp": "Date"},
+                      color_discrete_map={"norm_latency": "#4fc3f7", "norm_intensity": "#f77f00"})
+        fig.update_layout(
+            paper_bgcolor="#0a0e1a", plot_bgcolor="#0d1b2a",
+            font=dict(color="#e0e8ff", family="Courier New", size=13),
+            xaxis=dict(gridcolor="#1e3a5f"), yaxis=dict(gridcolor="#1e3a5f"),
+            legend=dict(orientation="h", y=1.1, bgcolor="rgba(0,0,0,0)")
+        )
 
-            st.plotly_chart(fig, use_container_width=True)
+        for _, flare in df_flares.iterrows():
+            is_x = flare["class"][0] == "X"
+            color = "#ff4444" if is_x else "#ff9900"
+            fig.add_shape(type="line",
+                x0=str(flare["peak_time"]), x1=str(flare["peak_time"]),
+                y0=0, y1=1, yref="paper",
+                line=dict(color=color, dash="dash", width=2.5 if is_x else 1.5))
+            fig.add_annotation(
+                x=str(flare["peak_time"]), y=1, yref="paper",
+                text=flare["class"], showarrow=False,
+                font=dict(color=color, size=11, family="Courier New"), yshift=8)
 
-            st.markdown("### 🗂 Live Flare Event Log")
-            st.dataframe(df_flares[["peak_time", "intensity", "class"]], use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.markdown("### 🗂 Live Flare Event Log")
+        st.dataframe(df_flares[["peak_time", "intensity", "class"]], use_container_width=True)
 
 else:
     st.markdown("<div class='status-box'>Press the button above to fetch live data from NASA and RIPE Atlas.</div>", unsafe_allow_html=True)
